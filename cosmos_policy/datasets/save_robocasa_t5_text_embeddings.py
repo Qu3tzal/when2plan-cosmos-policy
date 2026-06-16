@@ -24,11 +24,18 @@ Examples:
 """
 
 import argparse
+import os
+
+import h5py
+from tqdm import tqdm
 
 from cosmos_policy.datasets.robocasa_dataset import RoboCasaDataset
 from cosmos_policy.datasets.t5_embedding_utils import (
     generate_t5_embeddings,
     save_embeddings,
+)
+from cosmos_policy.datasets.dataset_utils import (
+    get_hdf5_files,
 )
 
 
@@ -53,16 +60,39 @@ def main():
     args = parse_args()
     data_dir = args.data_dir
 
-    print("Loading data...")
-    dataset = RoboCasaDataset(
-        data_dir=data_dir,
-        rollout_data_dir=args.rollout_data_dir,
-        lazy_load_demos=True,
-        skip_computing_dataset_statistics=True,
-    )
+    if args.data_dir != "":
+        print("Loading data...")
+        dataset = RoboCasaDataset(
+            data_dir=data_dir,
+            rollout_data_dir=args.rollout_data_dir,
+            lazy_load_demos=True,
+            skip_computing_dataset_statistics=True,
+        )
 
-    t5_text_embeddings = generate_t5_embeddings(dataset.unique_commands)
-    save_embeddings(t5_text_embeddings, data_dir, check_exists=True)
+        t5_text_embeddings = generate_t5_embeddings(dataset.unique_commands)
+        save_embeddings(t5_text_embeddings, data_dir, check_exists=True)
+    # In the case of only rollout data:
+    elif args.rollout_data_dir != "":
+        print("Loading data...")
+
+        # Read all the HDF5 files, find the unique commands and put them in the set.
+        unique_commands = set()
+
+        rollout_hdf5_files = []
+        if args.rollout_data_dir:
+            assert os.path.exists(args.rollout_data_dir), (
+                f"Error: Rollout data directory '{args.rollout_data_dir}' does not exist."
+            )
+            rollout_hdf5_files = get_hdf5_files(args.rollout_data_dir)
+
+        for file in tqdm(rollout_hdf5_files, desc="Loading rollout metadata"):
+            with h5py.File(file, "r") as f:
+                # Get task description
+                command = f.attrs["task_description"]
+                unique_commands.add(command)
+
+        t5_text_embeddings = generate_t5_embeddings(unique_commands)
+        save_embeddings(t5_text_embeddings, data_dir, check_exists=True)
 
 
 if __name__ == "__main__":

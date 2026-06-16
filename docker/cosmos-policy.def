@@ -1,0 +1,78 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Build:
+#   apptainer build cosmos-policy.sif cosmos-policy.def
+#
+# Run (GPU-enabled):
+#   apptainer run --nv cosmos-policy.sif
+#
+# Note on user mapping: the Docker image used a gosu-based entrypoint to
+# remap HOST_USER_ID/HOST_GROUP_ID at runtime. Singularity/Apptainer already
+# executes the container as the calling host user (with host UID/GID and
+# $HOME bound through), so that logic is unnecessary here.
+
+Bootstrap: docker
+From: nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04
+
+%files
+    entrypoint.sh /usr/local/bin/cosmos-policy-entrypoint
+
+%environment
+    export DEBIAN_FRONTEND=noninteractive
+    export PATH="/usr/local/bin:${PATH}"
+
+%post
+    export DEBIAN_FRONTEND=noninteractive
+
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        cmake \
+        curl \
+        ffmpeg \
+        git \
+        git-lfs \
+        gosu \
+        libgl1 \
+        libegl1-mesa-dev \
+        libgl1-mesa-dri \
+        libglib2.0-0 \
+        sudo \
+        tree \
+        wget
+    apt-get clean
+    rm -rf /var/lib/apt/lists/*
+
+    # Install uv 0.8.12 (https://docs.astral.sh/uv/getting-started/installation/)
+    UV_VERSION=0.8.12
+    ARCH="$(uname -m)"
+    case "${ARCH}" in
+        x86_64)  UV_TARGET=x86_64-unknown-linux-gnu ;;
+        aarch64) UV_TARGET=aarch64-unknown-linux-gnu ;;
+        *) echo "Unsupported arch: ${ARCH}" >&2; exit 1 ;;
+    esac
+    curl -fsSL -o /tmp/uv.tar.gz \
+        "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-${UV_TARGET}.tar.gz"
+    tar -xzf /tmp/uv.tar.gz -C /tmp
+    install -m 0755 "/tmp/uv-${UV_TARGET}/uv"  /usr/local/bin/uv
+    install -m 0755 "/tmp/uv-${UV_TARGET}/uvx" /usr/local/bin/uvx
+    rm -rf /tmp/uv.tar.gz "/tmp/uv-${UV_TARGET}"
+
+    # Install just 1.42.4 (https://just.systems/man/en/pre-built-binaries.html)
+    curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh \
+        | bash -s -- --to /usr/local/bin --tag 1.42.4
+
+    chmod 0755 /usr/local/bin/cosmos-policy-entrypoint
+
+%runscript
+    exec /bin/bash "$@"
+
+%startscript
+    exec /bin/bash "$@"

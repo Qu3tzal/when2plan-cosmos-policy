@@ -66,7 +66,7 @@ def launch(config: Config, args: argparse.Namespace) -> None:
             num_replicas=parallel_state.get_data_parallel_world_size(),
             rank=parallel_state.get_data_parallel_rank(),
             shuffle=True,
-            seed=0,
+            seed=config.dataloader_train.sampler.seed,
         )
         dataloader_train = DataLoader(
             dataset=dataset,

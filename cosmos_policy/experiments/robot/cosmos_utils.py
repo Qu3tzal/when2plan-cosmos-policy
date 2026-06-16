@@ -1553,6 +1553,7 @@ def get_value_prediction(
 
         return_dict = dict(
             value_prediction=value_prediction,
+            all_value_predictions=all_value_predictions,
         )
 
     return return_dict
