@@ -1553,6 +1553,7 @@ def get_value_prediction(
 
         return_dict = dict(
             value_prediction=value_prediction,
+            all_value_predictions=all_value_predictions,
         )
 
     return return_dict
@@ -2220,10 +2221,7 @@ def query_model_parallel(
             observation_dict,
             task_description,
         )
-
-        # If we got some results, return them
-        if query_results:
-            return query_results
+        return query_results
 
     except Exception as e:
         print(f"Parallel inference failed: {e}")

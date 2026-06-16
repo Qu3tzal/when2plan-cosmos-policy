@@ -42,16 +42,20 @@ class _LossRecord:
         self.edm_loss = 0
 
     def get_stat(self) -> Tuple[float, float]:
+        # All ranks must participate in the all_reduce even when this rank's
+        # iter_count is 0 (e.g. all losses were NaN/Inf in the window), otherwise
+        # the differing collective order across ranks deadlocks the next FSDP
+        # allgather.
         if self.iter_count > 0:
             avg_loss = self.loss / self.iter_count
             avg_edm_loss = self.edm_loss / self.iter_count
-            dist.all_reduce(avg_loss, op=dist.ReduceOp.AVG)
-            dist.all_reduce(avg_edm_loss, op=dist.ReduceOp.AVG)
-            avg_loss = avg_loss.item()
-            avg_edm_loss = avg_edm_loss.item()
         else:
-            avg_loss = 0
-            avg_edm_loss = 0
+            avg_loss = torch.zeros((), device="cuda")
+            avg_edm_loss = torch.zeros((), device="cuda")
+        dist.all_reduce(avg_loss, op=dist.ReduceOp.AVG)
+        dist.all_reduce(avg_edm_loss, op=dist.ReduceOp.AVG)
+        avg_loss = avg_loss.item()
+        avg_edm_loss = avg_edm_loss.item()
         self.reset()
         return avg_loss, avg_edm_loss
 

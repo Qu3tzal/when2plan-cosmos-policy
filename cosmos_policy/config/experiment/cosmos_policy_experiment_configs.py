@@ -285,6 +285,96 @@ cosmos_predict2_2b_480p_robocasa_50_demos_per_task__inference = LazyDict(
 )
 
 
+# RoboCasa planning model
+# Dataset: 479 rollouts from evaluations with Cosmos Policy
+robocasa_2026_05_07__479_rollouts__cosmos_policy__dataset = L(
+    RoboCasaDataset
+)(
+    data_dir=os.path.join(BASE_DATASETS_DIR, "RoboCasa-Cosmos-Policy", "success_only"),
+    t5_text_embeddings_path=os.path.join(BASE_DATASETS_DIR, "RoboCasa-Cosmos-Policy", "success_only", "t5_embeddings.pkl"),
+    chunk_size=32,
+    lazy_load_demos=True,
+    use_image_aug=True,
+    use_stronger_image_aug=True,
+    use_proprio=True,
+    normalize_proprio=True,
+    normalize_actions=True,
+    num_duplicates_per_image=4,  # WAN 2.1 tokenizer: 4 images per latent frame
+    demonstration_sampling_prob=0.1,  # Smaller demonstration sampling prob - more emphasis on rollouts
+    success_rollout_sampling_prob=0.5,
+    return_value_function_returns=True,
+    gamma=0.99,
+    rollout_data_dir=os.path.join(BASE_DATASETS_DIR, "RoboCasa-Cosmos-Policy", "all_episodes"),
+)
+cosmos_predict2_2b_480p_robocasa_50_demos_per_task__resumeFrom50K_648_rollouts_Vsprime_value_func = LazyDict(
+    dict(
+        defaults=[
+            "/experiment/cosmos_predict2_2b_480p_robocasa_50_demos_per_task",
+            "_self_",
+        ],
+        checkpoint=dict(
+            # Resume from 50K checkpoint of base Cosmos Policy run
+            load_path=get_checkpoint_path(
+                "hf://nvidia/Cosmos-Policy-RoboCasa-Predict2-2B/Cosmos-Policy-RoboCasa-Predict2-2B.pt"
+            ),
+        ),
+        scheduler=dict(
+            # LR decay for 15K steps in cycle #1, then decay by 5x and stay constant forever in cycle #2
+            cycle_lengths=[15000, 100000000000000],
+            warm_up_steps=[1500, 0],
+            f_start=[1e-6, 0.06],
+            f_max=[1.0, 0.06],
+            f_min=[0.3, 0.06],
+        ),
+        dataloader_train=L(DataLoader)(
+            num_workers=2,
+            persistent_workers=True,
+            pin_memory=True,
+            dataset=robocasa_2026_05_07__479_rollouts__cosmos_policy__dataset,
+            sampler=L(DistributedSampler)(
+                dataset=robocasa_2026_05_07__479_rollouts__cosmos_policy__dataset,
+                num_replicas=L(parallel_state.get_data_parallel_world_size)(),
+                rank=L(parallel_state.get_data_parallel_rank)(),
+                shuffle=True,
+                seed=42,
+            ),
+            batch_size=8,
+            drop_last=True,
+        ),
+        model=L(CosmosPolicyVideo2WorldModel)(
+            config=dict(
+                mask_current_state_action_for_value_prediction=True,  # Use input masking to mask out irrelevant inputs (current state and action) during value prediction
+            ),
+        ),
+        job=dict(
+            group="cosmos_v2_finetune",
+            name="cosmos_predict2_2b_480p_robocasa_50_demos_per_task__resumeFrom50K_648_rollouts_Vsprime_value_func",
+        ),
+    )
+)
+# Inference version
+cosmos_predict2_2b_480p_robocasa_50_demos_per_task__resumeFrom50K_648_rollouts_Vsprime_value_func__inference_only = LazyDict(
+    dict(
+        defaults=[
+            "/experiment/cosmos_predict2_2b_480p_robocasa_50_demos_per_task__resumeFrom50K_648_rollouts_Vsprime_value_func",
+            "_self_",
+        ],
+        model=L(CosmosPolicyVideo2WorldModel)(
+            config=dict(
+                sde=L(HybridEDMSDE)(
+                    sigma_max=80,
+                    sigma_min=4,
+                )
+            )
+        ),
+        job=dict(
+            group="cosmos_v2_inference",
+            name="cosmos_predict2_2b_480p_robocasa_50_demos_per_task__resumeFrom50K_648_rollouts_Vsprime_value_func__inference_only",
+        ),
+    )
+)
+
+
 # *** Main checkpoint ***
 aloha_cosmos_policy_dataset_185_demos = L(ALOHADataset)(
     data_dir=os.path.join(BASE_DATASETS_DIR, "ALOHA-Cosmos-Policy", "preprocessed"),
@@ -472,6 +562,8 @@ def register_configs():
         # RoboCasa
         cosmos_predict2_2b_480p_robocasa_50_demos_per_task,  # *** Main checkpoint ***
         cosmos_predict2_2b_480p_robocasa_50_demos_per_task__inference,
+        cosmos_predict2_2b_480p_robocasa_50_demos_per_task__resumeFrom50K_648_rollouts_Vsprime_value_func, # RoboCasa planning model
+        cosmos_predict2_2b_480p_robocasa_50_demos_per_task__resumeFrom50K_648_rollouts_Vsprime_value_func__inference_only,
         # ALOHA
         cosmos_predict2_2b_480p_aloha_185_demos_4_tasks_mixture_foldshirt15_candiesinbowl45_candyinbag45_eggplantchickenonplate80,  # *** Main checkpoint ***
         cosmos_predict2_2b_480p_aloha_185_demos_4_tasks_mixture_foldshirt15_candiesinbowl45_candyinbag45_eggplantchickenonplate80__inference_only,

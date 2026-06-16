@@ -63,6 +63,7 @@ Usage examples:
 
 import ast
 import multiprocessing as mp
+import json
 import os
 import pickle
 import secrets
@@ -401,6 +402,7 @@ def run_episode(
         actions_list = []
     # Best-of-N search variables
     future_image_predictions_list = []
+    planning_stats = []
     # Main episode loop
     for t in range(max_steps):
         observation = prepare_observation(obs, cfg.flip_images)
@@ -436,7 +438,10 @@ def run_episode(
             else:
                 # Serial execution
                 query_results = []
-                for query_idx in range(cfg.num_queries_best_of_n):
+                # Disable planning during the episode first steps
+                num_queries_best_of_n = cfg.num_queries_best_of_n
+
+                for query_idx in range(num_queries_best_of_n):
                     actions_by_depth = []  # Action chunks across all depths of the search
                     future_image_predictions_by_depth = []  # Future image predictions across all depths of the search
                     value_predictions_by_depth = []  # Value predictions across all depths of the search
@@ -458,7 +463,7 @@ def run_episode(
                     )
                     query_time = time.time() - start_time
                     log_message(
-                        f"Query {query_idx + 1}/{cfg.num_queries_best_of_n}: Action query time = {query_time:.3f} sec",
+                        f"Query {query_idx + 1}/{num_queries_best_of_n}: Action query time = {query_time:.3f} sec",
                         log_file,
                     )
                     return_dict["actions"] = action_return_dict["actions"]
@@ -491,7 +496,7 @@ def run_episode(
                         )
                         query_time = time.time() - start_time
                         log_message(
-                            f"Query {query_idx + 1}/{cfg.num_queries_best_of_n}: Future state prediction query time = {query_time:.3f} sec",
+                            f"Query {query_idx + 1}/{num_queries_best_of_n}: Future state prediction query time = {query_time:.3f} sec",
                             log_file,
                         )
                         return_dict["future_image_predictions"] = future_state_return_dict["future_image_predictions"]
@@ -516,13 +521,15 @@ def run_episode(
                         )
                         query_time = time.time() - start_time
                         log_message(
-                            f"Query {query_idx + 1}/{cfg.num_queries_best_of_n}: Value prediction query time = {query_time:.3f} sec",
+                            f"Query {query_idx + 1}/{num_queries_best_of_n}: Value prediction query time = {query_time:.3f} sec",
                             log_file,
                         )
                         return_dict["value_prediction"] = value_return_dict["value_prediction"]
+                        return_dict["all_value_predictions"] = value_return_dict["all_value_predictions"]
+                        value_std = torch.tensor(value_return_dict["all_value_predictions"]).std()
                         value_predictions_by_depth.append(return_dict["value_prediction"])
                         log_message(
-                            f"Query {query_idx + 1}/{cfg.num_queries_best_of_n}: Value prediction: {return_dict['value_prediction']:.4f}",
+                            f"Query {query_idx + 1}/{num_queries_best_of_n}: Value prediction: {return_dict['value_prediction']:.4f}, std: {value_std:.4f}",
                             log_file,
                         )
                     elif cfg.ar_qvalue_prediction:
@@ -541,17 +548,19 @@ def run_episode(
                         )
                         query_time = time.time() - start_time
                         log_message(
-                            f"Query {query_idx + 1}/{cfg.num_queries_best_of_n}: Value prediction query time = {query_time:.3f} sec",
+                            f"Query {query_idx + 1}/{num_queries_best_of_n}: Value prediction query time = {query_time:.3f} sec",
                             log_file,
                         )
                         return_dict["value_prediction"] = value_return_dict["value_prediction"]
+                        return_dict["all_value_predictions"] = value_return_dict["all_value_predictions"]
                         value_predictions_by_depth.append(return_dict["value_prediction"])
                         log_message(
-                            f"Query {query_idx + 1}/{cfg.num_queries_best_of_n}: Value prediction: {return_dict['value_prediction']:.4f}",
+                            f"Query {query_idx + 1}/{num_queries_best_of_n}: Value prediction: {return_dict['value_prediction']:.4f}",
                             log_file,
                         )
                     else:
                         return_dict["value_prediction"] = action_return_dict["value_prediction"]
+                        return_dict["all_value_predictions"] = action_return_dict["value_prediction"]
                         value_predictions_by_depth.append(return_dict["value_prediction"])
 
                     if cfg.search_depth > 1:
@@ -673,7 +682,7 @@ def run_episode(
                                 return_dict["value_prediction"] = value_return_dict["value_prediction"]
                                 value_predictions_by_depth.append(return_dict["value_prediction"])
                                 log_message(
-                                    f"Query {query_idx + 1}/{cfg.num_queries_best_of_n}: Value prediction: {return_dict['value_prediction']:.4f}",
+                                    f"Query {query_idx + 1}/{num_queries_best_of_n}: Value prediction: {return_dict['value_prediction']:.4f}",
                                     log_file,
                                 )
                     # Add results to the return dict
@@ -711,6 +720,7 @@ def run_episode(
                     return_dict["actions"],
                     return_dict["future_image_predictions"],
                     return_dict["value_prediction"],
+                    # return_dict["all_value_predictions"],
                 )
                 for query_idx, return_dict in enumerate(query_results)
             }
@@ -719,10 +729,27 @@ def run_episode(
             best_actions = best_return_dict[0]
             best_future_predictions = best_return_dict[1]
             best_value_predictions = best_return_dict[2]
+
+            # Calculate planning advantage and collect info
+            base_value = seed_to_return_dict[cfg.seed][2]
+            advantage = best_value_predictions - base_value
+            all_values = [rd["value_prediction"] for rd in query_results]
+
+            planning_stats.append({
+                "timestep": t,
+                "base_value": float(base_value),
+                "best_value": float(best_value_predictions),
+                "advantage": float(advantage),
+                "all_values": [float(v) for v in all_values],
+            })
+
+            # base_value_std = torch.tensor(seed_to_return_dict[cfg.seed][3]).std()
+
             # Use the best actions, future predictions, and value predictions found
             action_queue.extend(best_actions)
             future_image_predictions_list.append(best_future_predictions)
             log_message(f"t={t}: Selected seed {best_seed} with value = {best_value_predictions:.4f}", log_file)
+            # log_message(f"t={t}: Base value = {base_value:.4f}, Advantage = {advantage:.4f}, Value std of the first seed: {base_value_std}", log_file)
 
         # Get next action from chunk
         action = action_queue.popleft()
@@ -758,6 +785,7 @@ def run_episode(
             proprio=np.stack(proprio_list, axis=0),  # (T, D)
             actions=np.stack(actions_list, axis=0),  # (T, action_dim)
             success=success,
+            planning_stats=json.dumps(planning_stats),
         )
         # Add future image predictions
         if len(future_image_predictions_list) > 0:
@@ -792,6 +820,7 @@ def run_episode(
         replay_wrist_images,
         future_image_predictions_list,
         collected_data,
+        planning_stats,
     )
 
 
@@ -839,6 +868,7 @@ def run_task(
             replay_wrist_images,
             future_image_predictions_list,
             collected_data,
+            planning_stats,
         ) = run_episode(
             cfg,
             env,
@@ -852,6 +882,11 @@ def run_task(
         )
         successes.append(success)
         episode_lengths.append(length)
+
+        if planning_stats:
+            avg_advantage = np.mean([stat["advantage"] for stat in planning_stats])
+            log_message(f"Average planning advantage for episode {episode_idx + 1} advantage: {avg_advantage:.4f}", log_file)
+
         # Update counters
         total_episodes += 1
         if success:
