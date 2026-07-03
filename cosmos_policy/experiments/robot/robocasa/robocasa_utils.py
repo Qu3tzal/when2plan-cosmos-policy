@@ -53,6 +53,88 @@ def save_rollout_video(
     return mp4_path
 
 
+def render_value_graph(
+    values_per_inference_step,
+    num_open_loop_steps,
+    total_frames,
+    current_frame,
+    width,
+    height,
+    font=None,
+):
+    """Render a line plot of the planned value over the episode with a marker at the current frame.
+
+    The value function outputs one scalar per inference step (best-of-N requery); that value is held
+    for `num_open_loop_steps` env frames (a step function). The x-axis is the env timestep, the y-axis
+    is the value in [0, 1], and a red vertical line + dot marks where the current frame sits.
+
+    Args:
+        values_per_inference_step: list of scalar planned values, one per inference step.
+        num_open_loop_steps: env frames each inference step's plan is executed for.
+        total_frames: total number of env frames in the episode (x-axis extent).
+        current_frame: index of the frame being rendered (marker position).
+        width, height: output image size in pixels.
+        font: optional PIL font for axis labels.
+
+    Returns:
+        np.ndarray (height, width, 3) uint8 image of the graph.
+    """
+    margin_l, margin_r, margin_t, margin_b = 44, 12, 14, 22
+    plot_w = max(1, width - margin_l - margin_r)
+    plot_h = max(1, height - margin_t - margin_b)
+
+    img = Image.new("RGB", (width, height), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+
+    vmin, vmax = 0.0, 1.0  # value-function output range
+
+    def to_xy(frame, value):
+        if total_frames > 1:
+            x = margin_l + plot_w * (frame / (total_frames - 1))
+        else:
+            x = margin_l
+        y = margin_t + plot_h * (1.0 - (value - vmin) / (vmax - vmin))
+        return int(round(x)), int(round(y))  # int coords for broad Pillow compatibility
+
+    # Plot border + horizontal gridlines/labels at 0.0, 0.5, 1.0
+    draw.rectangle([margin_l, margin_t, margin_l + plot_w, margin_t + plot_h], outline=(0, 0, 0))
+    for yval in (0.0, 0.5, 1.0):
+        _, gy = to_xy(0, yval)
+        draw.line([(margin_l, gy), (margin_l + plot_w, gy)], fill=(220, 220, 220))
+        if font is not None:
+            draw.text((4, gy - 6), f"{yval:.1f}", font=font, fill=(0, 0, 0))
+
+    n_steps = len(values_per_inference_step)
+    if n_steps == 0 or total_frames <= 0:
+        return np.array(img, dtype=np.uint8)
+
+    # Build per-frame value series (step function held over each plan's open-loop steps)
+    points = []
+    for f in range(total_frames):
+        step_idx = min(f // max(1, num_open_loop_steps), n_steps - 1)
+        points.append(to_xy(f, values_per_inference_step[step_idx]))
+    if len(points) >= 2:
+        draw.line(points, fill=(30, 90, 200), width=2)
+
+    # Current-frame marker: vertical line + dot at the current planned value
+    cur_frame = min(max(current_frame, 0), total_frames - 1)
+    cur_step = min(cur_frame // max(1, num_open_loop_steps), n_steps - 1)
+    cur_val = float(values_per_inference_step[cur_step])
+    cx, cy = to_xy(cur_frame, cur_val)
+    draw.line([(cx, margin_t), (cx, margin_t + plot_h)], fill=(200, 30, 30), width=1)
+    r = 4
+    draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(200, 30, 30))
+    if font is not None:
+        draw.text(
+            (margin_l, margin_t + plot_h + 4),
+            f"planned value = {cur_val:.3f}",
+            font=font,
+            fill=(0, 0, 0),
+        )
+
+    return np.array(img, dtype=np.uint8)
+
+
 def save_rollout_video_with_future_image_predictions(
     rollout_primary_images,
     rollout_secondary_images,
@@ -66,13 +148,16 @@ def save_rollout_video_with_future_image_predictions(
     future_primary_image_predictions=None,
     future_secondary_image_predictions=None,
     future_wrist_image_predictions=None,
+    value_predictions=None,
     show_diff=False,
     log_file=None,
     show_timestep=False,
     timestep=0,
 ):
-    """Saves an MP4 replay of an episode with 2 rows and 3 columns:
-    Top row: current wrist, current primary, current secondary images
+    """Saves an MP4 replay of an episode with 3 rows and 3 columns:
+    Top row:    current wrist, current primary, current secondary images
+    Middle row: the wrist/primary/secondary images that were fed to the world model as conditioning
+                input for the prediction shown below (the observation at the last requery frame).
     Bottom row: future wrist, future primary, future secondary predictions.
 
     For RoboCasa, we have three camera views:
@@ -150,18 +235,42 @@ def save_rollout_video_with_future_image_predictions(
         future_primary_img = future_primary_image_predictions[future_primary_idx]
         future_secondary_img = future_secondary_image_predictions[future_secondary_idx]
 
-        # Create a combined image with 2 rows and 3 columns
-        combined_img = np.zeros((target_h * 2, target_w * 3, c), dtype=np.uint8)
+        # Determine the images that were fed to the world model as conditioning input for the prediction
+        # shown below. The world model is requeried every `num_open_loop_steps` frames, so inference step
+        # `future_idx` conditioned on the observation captured at frame `future_idx * num_open_loop_steps`
+        # (clamped to the available rollout / prediction lengths so it stays aligned with the row below).
+        wm_input_inference_step = min(future_idx, len(future_primary_image_predictions) - 1)
+        wm_input_frame_idx = min(wm_input_inference_step * num_open_loop_steps, len(rollout_primary_images) - 1)
+        wm_input_images_to_process = [
+            rollout_wrist_images[wm_input_frame_idx],
+            rollout_primary_images[wm_input_frame_idx],
+            rollout_secondary_images[wm_input_frame_idx],
+        ]
+        processed_wm_input_images = []
+        for wm_input_img in wm_input_images_to_process:
+            pil_img = Image.fromarray(wm_input_img)
+            if pil_img.size != (target_w, target_h):
+                pil_img = pil_img.resize((target_w, target_h), Image.LANCZOS)
+            processed_wm_input_images.append(np.array(pil_img))
+        wm_input_wrist_resized, wm_input_primary_resized, wm_input_secondary_resized = processed_wm_input_images
+
+        # Create a combined image with 3 rows and 3 columns
+        combined_img = np.zeros((target_h * 3, target_w * 3, c), dtype=np.uint8)
 
         # Top row: current images (wrist, primary, secondary)
         combined_img[:target_h, :target_w, :] = wrist_img_resized
         combined_img[:target_h, target_w : target_w * 2, :] = primary_img_resized
         combined_img[:target_h, target_w * 2 : target_w * 3, :] = secondary_img_resized
 
+        # Middle row: world model input images (the conditioning observation for this inference step)
+        combined_img[target_h : target_h * 2, :target_w, :] = wm_input_wrist_resized
+        combined_img[target_h : target_h * 2, target_w : target_w * 2, :] = wm_input_primary_resized
+        combined_img[target_h : target_h * 2, target_w * 2 : target_w * 3, :] = wm_input_secondary_resized
+
         # Bottom row: future predictions (wrist, primary, secondary)
-        combined_img[target_h:, :target_w, :] = future_wrist_img
-        combined_img[target_h:, target_w : target_w * 2, :] = future_primary_img
-        combined_img[target_h:, target_w * 2 : target_w * 3, :] = future_secondary_img
+        combined_img[target_h * 2 :, :target_w, :] = future_wrist_img
+        combined_img[target_h * 2 :, target_w : target_w * 2, :] = future_primary_img
+        combined_img[target_h * 2 :, target_w * 2 : target_w * 3, :] = future_secondary_img
 
         # Create a blank area for text (white background)
         text_area = np.ones((text_height, target_w * 3, 3), dtype=np.uint8) * 255
@@ -202,8 +311,29 @@ def save_rollout_video_with_future_image_predictions(
         # Convert back to numpy array
         text_area = np.array(text_img)
 
+        # Label each image row so the three near-identical rows are easy to tell apart.
+        combined_pil = Image.fromarray(combined_img)
+        combined_draw = ImageDraw.Draw(combined_pil)
+        row_labels = ["current obs", "world model input", "world model output"]
+        for row_idx, row_label in enumerate(row_labels):
+            combined_draw.text((4, row_idx * target_h + 4), row_label, font=font, fill=(255, 255, 0))
+        combined_img = np.array(combined_pil)
+
         # Combine text area and images
         final_frame = np.vstack((text_area, combined_img))
+
+        # Optional 4th row: planned-value graph over time with a marker at the current frame
+        if value_predictions is not None and len(value_predictions) > 0:
+            graph_row = render_value_graph(
+                values_per_inference_step=value_predictions,
+                num_open_loop_steps=num_open_loop_steps,
+                total_frames=len(rollout_primary_images),
+                current_frame=i,
+                width=target_w * 3,
+                height=target_h,
+                font=font,
+            )
+            final_frame = np.vstack((final_frame, graph_row))
 
         video_writer.append_data(final_frame)
 
