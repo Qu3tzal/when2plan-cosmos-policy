@@ -1,6 +1,8 @@
 #!/bin/bash
 set -e
 
+export HF_TOKEN="${HF_TOKEN:?Set HF_TOKEN in your environment before running}"
+export WANDB_API_KEY="${WANDB_API_KEY:?Set WANDB_API_KEY in your environment before running}"
 
 uv sync --extra cu128 --group robocasa  --python 3.10
 uv pip install -e robocasa-cosmos-policy
@@ -35,7 +37,7 @@ for item in "${tasks[@]}"; do
         --seed 195 \
         --randomize_seed False \
         --deterministic True \
-        --use_variance_scale False \
+        --use_variance_scale True \
         --use_jpeg_compression True \
         --flip_images True \
         --num_denoising_steps_action 10 \
@@ -48,6 +50,7 @@ for item in "${tasks[@]}"; do
         --use_ensemble_value_predictions True \
         --ar_future_prediction True \
         --ar_value_prediction True \
+        --mask_current_state_action_for_value_prediction True \
         --parallel_timeout 300 \
         --search_depth 1
 done
