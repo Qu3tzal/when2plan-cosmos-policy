@@ -15,11 +15,20 @@
 # would draw a fresh random seed each query and defeat the controlled comparison).
 set -e
 
-export HF_TOKEN="${HF_TOKEN:?Set HF_TOKEN in your environment before running}"
-export WANDB_API_KEY="${WANDB_API_KEY:?Set WANDB_API_KEY in your environment before running}"
+# HF_TOKEN and WANDB_API_KEY are read from the environment; do not hardcode them here.
+: "${HF_TOKEN:?Set HF_TOKEN in the environment before running}"
 
-# uv sync --extra cu128 --group robocasa  --python 3.10
-# uv pip install -e robocasa-cosmos-policy
+# Keep MuJoCo's EGL offscreen renderer and model inference on DIFFERENT physical GPUs.
+# When they share a GPU, the inference bursts (best-of-N + ensembles) fill GPU memory and EGL
+# rendering silently returns corrupted observations (tiled/garbage/gray frames) mid-episode.
+# EGL enumerates a single device in this container (NVIDIA_DRIVER_CAPABILITIES has no "graphics"),
+# which is physical GPU 0, so we remap CUDA so that torch's cuda:0 is physical GPU 1 instead.
+# Both are overridable from the calling environment.
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1,0}
+export MUJOCO_EGL_DEVICE_ID=${MUJOCO_EGL_DEVICE_ID:-0}
+
+uv sync --extra cu128 --group robocasa  --python 3.10
+uv pip install -e robocasa-cosmos-policy
 # uv run --extra cu128 --group robocasa --python 3.10 robocasa-cosmos-policy/robocasa/scripts/download_kitchen_assets.py
 # uv run --extra cu128 --group robocasa --python 3.10 robocasa-cosmos-policy/robocasa/scripts/setup_macros.py
 # uv run --extra cu128 --group robocasa --python 3.10 hf auth login

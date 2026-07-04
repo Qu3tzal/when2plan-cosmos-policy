@@ -2157,6 +2157,11 @@ def persistent_parallel_worker(gpu_id, cfg, dataset_stats, task_queue, result_qu
                     }
                 )
 
+                # Release cached GPU memory between queries. The main process renders MuJoCo (EGL)
+                # observations on one of these GPUs while workers are idle; if a worker's torch cache
+                # keeps that GPU near-full, offscreen rendering silently returns corrupted frames.
+                torch.cuda.empty_cache()
+
             except Exception as e:
                 # Only put error in queue if it's not an empty queue error from task_queue.get() (which is normal)
                 if not isinstance(e, queue.Empty):

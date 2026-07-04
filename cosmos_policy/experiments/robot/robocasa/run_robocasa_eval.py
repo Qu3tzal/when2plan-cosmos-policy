@@ -1357,6 +1357,13 @@ def run_episode(
                     "data_batch": query_results[best_query_idx].get("data_batch", None),
                 }
 
+            # Release torch's cached GPU memory now that this requery's inference burst is done.
+            # The burst can fill the whole GPU, and when MuJoCo's EGL offscreen renderer shares that
+            # GPU, rendering on a near-full device silently returns corrupted observations (tiled/
+            # garbage/gray images) and the render context never recovers for the rest of the run.
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
         # Get next action from chunk
         action = action_queue.popleft()
         # RoboCasa: Policy was trained on 7-dim manipulation actions, but env expects 12-dim (7 + 5 mobile base)
